@@ -1,0 +1,2850 @@
+#### Bash script for taxonomic classification of ASV´s in Qiime2-amplicon-2025.7 environment
+qiime greengenes2 non-v4-16s \  #map our ASVs onto the greengenes2 tree, non-v4-16s is used because our sequences are paired end V3-V4 region 16S sequences
+>    --i-table ASV_table.qza \
+>    --i-sequences ASV_sequences.qza \
+>    --i-backbone 2024.09.backbone.full-length.fna.qza \
+>    --o-mapped-table featuretable_gg2.qza \
+
+qiime greengenes2 taxonomy-from-table \  #assign taxonomic profiles from tree alignment results
+>     --i-reference-taxonomy 2024.09.taxonomy.asv.nwk.qza \
+>     --i-table featuretable_gg2.qza \
+>     --o-classification gg2_taxonomy.qza
+
+#### Bash script for Alpha diveristy analysis in Qiime2-amplicon-2025.7 environment
+qiime diversity core-metrics
+--i-table featuretable_gg2.qza
+--p-sampling-depth 47928
+--m-metadata-file sm_metadata_all_groups.tsv
+--output-dir diversity_metrics
+
+
+
+### R scripts for statistical analysis
+####make nutrient intake heatmap
+# Load libraries
+library(tidyverse)
+library(pheatmap)
+
+# Read TSV file
+data <- read.delim("dietary_intakes_experimental.tsv",
+                   header = TRUE,
+                   sep = "\t",
+                   check.names = FALSE)
+
+# Set Feature column as row names
+mat <- data %>%
+  column_to_rownames("Feature") %>%
+  as.matrix()
+
+# Ensure numeric matrix
+mat <- apply(mat, 2, as.numeric)
+rownames(mat) <- data$Feature
+
+# Row-wise z-score normalization
+# (each nutrient scaled across groups)
+mat_z <- t(scale(t(mat)))
+
+# Replace any NA values that may arise from zero variance rows
+mat_z[is.na(mat_z)] <- 0
+
+# Plot clustered heatmap
+pheatmap(
+  mat_z,
+  scale = "none",
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  color = colorRampPalette(c("blue", "white", "red"))(100),
+  border_color = NA,
+  fontsize_row = 8,
+  fontsize_col = 10,
+  main = "Nutrient Intake Z-Scores"
+)
+
+###pca of dietary intakes
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+
+# Read data
+diet <- read.delim(
+  "dietary_intakes_experimental.tsv",
+  sep = "\t",
+  check.names = FALSE
+)
+
+# Create matrix
+mat <- diet %>%
+  column_to_rownames("Feature") %>%
+  as.matrix()
+
+storage.mode(mat) <- "numeric"
+
+# Transpose so:
+# rows = groups
+# columns = nutrients
+pca_input <- t(mat)
+
+# Standardize nutrients before PCA
+pca <- prcomp(
+  pca_input,
+  center = TRUE,
+  scale. = TRUE
+)
+
+# Variance explained
+var_explained <- summary(pca)$importance[2, ] * 100
+
+# Scores for each group
+scores <- as.data.frame(pca$x)
+scores$Group <- rownames(scores)
+
+# Plot
+ggplot(scores,
+       aes(x = PC1, y = PC2, label = Group)) +
+  geom_point(size = 3) +
+  geom_text_repel() +
+  labs(
+    x = paste0("PC1 (", round(var_explained[1], 1), "%)"),
+    y = paste0("PC2 (", round(var_explained[2], 1), "%)"),
+    title = "PCA of Dietary Intake Profiles"
+  ) +
+  theme_classic()
+
+
+####make heatmap of measured parameters
+library(dplyr)
+library(tibble)
+
+dat <- read.delim(
+  "sm_metadata_treatments_diet_relative_body_mass.tsv",
+  sep = "\t",
+  check.names = FALSE
+)
+
+# Remove metadata and dietary variables
+heat_dat <- dat %>%
+  select(
+    -sample_name,
+    -Diet_PC1,
+    -Carotenoid,
+    -`Omega-3`,
+    -`a-tocopherol`,
+    -catechin,
+    -Carnosic_Acid,
+    -PTSO
+  )
+
+# Average within group
+group_means <- heat_dat %>%
+  group_by(Group) %>%
+  summarise(across(everything(), mean, na.rm = TRUE))
+
+# Convert to matrix
+mat <- group_means %>%
+  column_to_rownames("Group") %>%
+  as.matrix()
+
+storage.mode(mat) <- "numeric"
+# Z-score features across groups
+mat_z <- scale(mat)
+
+# Replace possible NAs from zero-variance features
+mat_z[is.na(mat_z)] <- 0
+library(pheatmap)
+
+pheatmap(
+  t(mat_z),
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  scale = "none",
+  border_color = NA,
+  color = colorRampPalette(
+    c("navy", "white", "firebrick3")
+  )(100),
+  fontsize_row = 8,
+  fontsize_col = 10,
+  main = "Group Mean Phenotypes Relative Body MAss (Z-scored)"
+)
+##test cluster significance
+library(pvclust)
+
+set.seed(123)
+
+pv_groups <- pvclust(
+  t(mat_z),
+  method.dist = "euclidean",
+  method.hclust = "ward.D2",
+  nboot = 1000
+)
+
+plot(pv_groups)
+
+pvrect(
+  pv_groups,
+  alpha = 0.95
+)
+##make phenotype group PCA
+library(tidyverse)
+library(ggrepel)
+
+# mat_z from the previous heatmap analysis:
+# rows = groups
+# columns = phenotypic measurements
+#
+# If not already available:
+# pca_input <- mat_z
+
+phen_pca <- prcomp(
+  mat_z,
+  center = FALSE,
+  scale. = FALSE
+)
+
+# Variance explained
+var_explained <- 100 * phen_pca$sdev^2 / sum(phen_pca$sdev^2)
+
+# Scores
+scores <- as.data.frame(phen_pca$x)
+scores$Group <- rownames(scores)
+
+# Plot
+ggplot(
+  scores,
+  aes(
+    x = PC1,
+    y = PC2,
+    label = Group
+  )
+) +
+  geom_point(size = 3) +
+  geom_text_repel() +
+  labs(
+    title = "Phenotype PCA",
+    x = paste0(
+      "PC1 (",
+      round(var_explained[1], 1),
+      "%)"
+    ),
+    y = paste0(
+      "PC2 (",
+      round(var_explained[2], 1),
+      "%)"
+    )
+  ) +
+  theme_classic(base_size = 14)
+
+###phenotype PCA loading plot
+pc1_loadings <- data.frame(
+  Feature = rownames(phen_pca$rotation),
+  Loading = phen_pca$rotation[,1]
+)
+
+pc1_loadings %>%
+  arrange(desc(abs(Loading)))
+pc2_loadings <- data.frame(
+  Feature = rownames(phen_pca$rotation),
+  Loading = phen_pca$rotation[,2]
+)
+
+pc2_loadings %>%
+  arrange(desc(abs(Loading)))
+library(forcats)
+
+top_pc2 <- pc2_loadings %>%
+  mutate(abs_loading = abs(Loading)) %>%
+  arrange(desc(abs_loading)) %>%
+  slice(1:15)
+
+ggplot(
+  top_pc2,
+  aes(
+    x = fct_reorder(Feature, abs_loading),
+    y = Loading
+  )
+) +
+  geom_col() +
+  coord_flip() +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Top contributors to Phenotype PC2",
+    x = "",
+    y = "Loading"
+  )
+
+ggplot(group_compare, aes(x = Diet_PC1, y = Phen_PC1)) +
+  # Linear trend across group means
+  geom_smooth(method = "lm", formula = y ~ x, color = "darkblue", fill = "lightblue", alpha = 0.2) +
+  # Group summary points
+  geom_point(aes(color = Group), size = 5) +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Group-Level Diet vs Phenotype Correlation",
+    subtitle = "Aggregated averages per group",
+    x = "Diet PC1 (Group Value)",
+    y = "Mean Phenotype PC1"
+  )
+
+
+####moving to microbiome make a PCOA of the MDM and FM samples only
+library(tidyverse)
+library(vegan)
+
+# 2. Load the input datasets
+feature_table <- read_tsv("featuretable_gg2.tsv") %>%
+  column_to_rownames("Feature_ID") %>%
+  t() %>%
+  as.data.frame()
+
+metadata_table <- read_tsv("sm_metadata_treatments_diet_relative_body_mass.tsv") %>%
+  column_to_rownames("sample_name")
+
+# Match rows across files exactly
+common_samples <- intersect(rownames(feature_table), rownames(metadata_table))
+feature_table <- feature_table[common_samples, ]
+metadata_table <- metadata_table[common_samples, ]
+
+# 3. Calculate Aitchison Distance and Perform PCoA
+dist_matrix <- vegdist(feature_table, method = "robust.aitchison")
+pcoa_res <- cmdscale(dist_matrix, k = 2, eig = TRUE)
+
+# Calculate correct variance percentages for the axes
+axis1_pct <- round((pcoa_res$eig[1] / sum(pcoa_res$eig)) * 100, 1)
+axis2_pct <- round((pcoa_res$eig[2] / sum(pcoa_res$eig)) * 100, 1)
+
+# Format the coordinates into a data frame
+plot_data <- data.frame(
+  PC1 = pcoa_res$points[, 1],
+  PC2 = pcoa_res$points[, 2],
+  Group = as.factor(metadata_table$Group)
+)
+
+# NEW: Calculate group centroids (mean coordinates per group)
+centroid_data <- plot_data %>%
+  group_by(Group) %>%
+  dplyr::summarize(PC1 = mean(PC1), PC2 = mean(PC2), .groups = 'drop')
+
+# 4. Handle Unlimited Groups (The Shape Fix)
+num_groups <- length(levels(plot_data$Group))
+extended_shapes <- c(16, 17, 15, 18, 19, 20, 8, 3, 4, 7, 9, 10, 11, 12, 13, 14, 0, 1, 2, 5, 6, 21, 22, 23, 24)[1:num_groups]
+extended_colors <- colorRampPalette(c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#565656"))(num_groups)
+
+# 5. Generate and Save the Plot
+pcoa_plot <- ggplot(plot_data, aes(x = PC1, y = PC2, color = Group, shape = Group)) +
+  # Individual sample points
+  geom_point(size = 4, alpha = 0.5) + 
+  # NEW: Overlaid centroid points (larger size, no transparency, black border outline)
+  geom_point(data = centroid_data, size = 7, stroke = 1.5, color = "black", alpha = 1) +
+  geom_point(data = centroid_data, size = 7, alpha = 1) +
+  # Scales and styling
+  scale_shape_manual(values = extended_shapes) +   
+  scale_color_manual(values = extended_colors) +   
+  theme_bw() +
+  labs(
+    title = "Aitchison PCoA Scatter Plot with Centroids",
+    subtitle = paste("Calculated via vegan | Total Groups:", num_groups),
+    x = paste0("PCoA 1 [", axis1_pct, "%]"),
+    y = paste0("PCoA 2 [", axis2_pct, "%]")
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_text(size = 11),
+    legend.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+# Display the plot
+print(pcoa_plot)
+
+####view dendrogram
+# 1. Load required libraries
+library(tidyverse)
+library(vegan)
+
+# 2. Load and align the input datasets
+feature_table <- read_tsv("featuretable_gg2.tsv") %>%
+  column_to_rownames("Feature_ID") %>%
+  t() %>%
+  as.data.frame()
+
+metadata_table <- read_tsv("sm_metadata_treatments_diet_relative_body_mass.tsv") %>%
+  column_to_rownames("sample_name")
+
+# Match rows across files exactly
+common_samples <- intersect(rownames(feature_table), rownames(metadata_table))
+feature_table <- feature_table[common_samples, ]
+metadata_table <- metadata_table[common_samples, ]
+
+# 3. Calculate full Sample-to-Sample robust Aitchison distance
+sample_dist <- vegdist(feature_table, method = "robust.aitchison")
+
+# 4. Collapse Sample Distances into a Group Mean Distance Matrix
+# meandist calculates the mean Aitchison distance between all groups
+group_metadata_factor <- as.factor(metadata_table$Group)
+group_mean_dist_matrix <- meandist(sample_dist, grouping = group_metadata_factor)
+
+# Convert the meandist object into a standard R distance object for hclust
+group_dist_obj <- as.dist(group_mean_dist_matrix)
+
+# 5. Run UPGMA Clustering on Group Means
+group_upgma_tree <- hclust(group_dist_obj, method = "average")
+
+# 6. Apply Height-Based Dynamic Tree Cutting on Groups
+# Calculate mean branching height to dynamically establish cluster thresholds
+cut_height <- mean(group_upgma_tree$height)
+
+# 7. Graph the Final Group Dendrogram directly in RStudio
+# (We removed png() so it displays in your RStudio Plots tab)
+
+plot(
+  group_upgma_tree, 
+  main = "Group-Mean UPGMA Dendrogram",
+  sub = "Distances: robust Aitchison | Nodes: Experimental Groups",
+  xlab = "Experimental Diet/Treatment Groups",
+  ylab = "Aitchison Distance (Height)",
+  hang = -1, # Aligns all group labels cleanly at the bottom
+  las = 2,   # Flips labels vertically so they don't overlap
+  cex = 0.9  # Font size of group labels
+)
+
+###check treatment group clustering significance
+# Check homogeneity of multivariate dispersions
+dispersion_check <- betadisper(dist_matrix, metadata_table$Group)
+anova(dispersion_check) # If p > 0.05, your PERMANOVA result is highly reliable
+# 1. Execute Global PERMANOVA
+global_perm <- adonis2(dist_matrix ~ Group, data = metadata_table, permutations = 999)
+print("--- Global PERMANOVA ---")
+print(global_perm)
+
+# 2. Function to extract pairwise differences (FDR corrected)
+pairwise_permanova <- function(x, groups) {
+  group_levels <- unique(as.character(groups))
+  pairs <- combn(group_levels, 2)
+  results <- data.frame()
+  
+  for(i in 1:ncol(pairs)) {
+    g1 <- pairs[1, i]
+    g2 <- pairs[2, i]
+    
+    subset_idx <- groups %in% c(g1, g2)
+    sub_matrix <- as.matrix(x)[subset_idx, subset_idx]
+    sub_groups <- groups[subset_idx]
+    
+    res <- adonis2(as.dist(sub_matrix) ~ sub_groups, permutations = 999)
+    
+    results <- rbind(results, data.frame(
+      Comparison = paste(g1, "vs", g2),
+      R2 = res$R2[1],
+      p_value = res$`Pr(>F)`[1]
+    ))
+  }
+  
+  # Benjamini-Hochberg (FDR) correction for 36 comparisons
+  results$p_adjusted <- p.adjust(results$p_value, method = "fdr")
+  return(results)
+}
+
+# 3. Run and filter for significant differences
+pairwise_results <- pairwise_permanova(dist_matrix, metadata_table$Group)
+
+print("--- Significant Group-to-Group Differences ---")
+pairwise_results %>% 
+  dplyr::filter(p_adjusted < 0.05) %>% 
+  print()
+# Export the global metrics
+as.data.frame(global_perm) %>% 
+  rownames_to_column("Source") %>% 
+  write_csv("global_permanova_results_experimental_aitchison.csv")
+
+as.data.frame(anova(dispersion_check)) %>% 
+  rownames_to_column("Source") %>% 
+  write_csv("global_dispersion_results_experimental_aitchison.csv")
+
+# Export all 36 pairwise group comparisons
+write_csv(pairwise_results, "pairwise_permanova_results_experimental_aitchison.csv")
+
+print("All files exported as separate CSV documents!")
+
+
+
+###test association between metadata and Aitchison PCoA by Adonis test
+###use strata to ensure permutation ins within group, to account for group structure
+# 1. Load required libraries
+library(tidyverse)
+library(vegan)
+
+# 2. Load and align the input datasets
+feature_table <- read_tsv("featuretable_gg2.tsv") %>%
+  column_to_rownames("Feature_ID") %>%
+  t() %>%
+  as.data.frame()
+
+metadata_table <- read_tsv("sm_metadata_treatments_diet_relative_body_mass.tsv") %>%
+  column_to_rownames("sample_name")
+
+# Match rows across files exactly
+common_samples <- intersect(rownames(feature_table), rownames(metadata_table))
+feature_table <- feature_table[common_samples, ]
+metadata_table <- metadata_table[common_samples, ]
+
+# Calculate master robust Aitchison distance matrix
+sample_dist <- vegdist(feature_table, method = "robust.aitchison")
+
+# Initialize results data frame
+permanova_blocked_results <- data.frame(
+  Variable = character(),
+  Type = character(),
+  R2 = numeric(),
+  F_Statistic = numeric(),
+  p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# 3. Run the loop, setting Group as a random effect/strata block
+for (col_name in colnames(metadata_table)) {
+  
+  # CRITICAL EXCLUSION: Skip the 'Group' column itself, since you cannot 
+  # block by Group while testing the effect of Group.
+  if (col_name == "Group") next
+  
+  var_vector <- metadata_table[[col_name]]
+  
+  # Skip columns that are completely empty or have zero total variance
+  if (all(is.na(var_vector)) || length(unique(na.omit(var_vector))) < 2) next
+  
+  # Filter out sample rows containing NA for this specific column
+  valid_samples <- !is.na(var_vector)
+  sub_dist <- as.dist(as.matrix(sample_dist)[valid_samples, valid_samples])
+  sub_var <- var_vector[valid_samples]
+  
+  # Extract the group assignments matching only the valid samples
+  sub_group_block <- as.factor(metadata_table$Group[valid_samples])
+  
+  # CRITICAL SKIP: If a variable is perfectly constant within ALL groups, 
+  # shuffling inside the groups yields zero variation. Adonis2 will crash.
+  # We track if the variable changes at least slightly inside the blocks.
+  if (is.numeric(sub_var)) {
+    # Check if there's any variance left within groups
+    within_group_sd <- aggregate(sub_var ~ sub_group_block, FUN = sd)
+    if (all(within_group_sd$sub_var == 0, na.rm = TRUE)) {
+      cat(paste("Skipping", col_name, "- perfectly constant within groups.\n"))
+      next
+    }
+  }
+  
+  # Run PERMANOVA with Group as a random blocking effect
+  # strata = sub_group_block locks the permutation engine inside each group
+  res <- adonis2(sub_dist ~ sub_var, strata = sub_group_block, permutations = 999)
+  
+  var_type <- if(is.numeric(sub_var)) "Continuous" else "Categorical"
+  
+  permanova_blocked_results <- permanova_blocked_results %>% 
+    add_row(
+      Variable = col_name,
+      Type = var_type,
+      R2 = res$R2[1],
+      F_Statistic = res$F[1],
+      p_value = res$`Pr(>F)`[1]
+    )
+}
+
+# 4. Apply False Discovery Rate (FDR) correction and display
+permanova_blocked_results <- permanova_blocked_results %>%
+  mutate(q_value = p.adjust(p_value, method = "fdr")) %>%
+  arrange(desc(R2))
+
+print("Indivudal Variable PERMANOVA Results (Group-Blocked Mixed Design):")
+print(permanova_blocked_results)
+
+# Save results
+write_csv(permanova_blocked_results, "group_blocked_permanova_results.csv")
+
+###use associations between asv and aitchison pcoa coordinates to identify fm3 driving candidates
+library(tidyverse)
+library(vegan)
+
+# 1. Normalize the feature table exactly how robust Aitchison calculates it
+asv_rclr <- decostand(feature_table, method = "rclr")
+
+# 2. Run envfit on the PCoA coordinates using the rCLR matrix
+# Note: matrix must be samples (rows) by features (columns)
+set.seed(42) # Ensures permutation reproducibility
+asv_fit <- envfit(pcoa_res$points, asv_rclr, permutations = 999)
+
+# 3. Extract the vector directions and statistical metrics
+envfit_results <- data.frame(
+  ASV_ID = rownames(asv_fit$vectors$arrows),
+  Vector_PC1 = asv_fit$vectors$arrows[, 1], # X-direction of arrow
+  Vector_PC2 = asv_fit$vectors$arrows[, 2], # Y-direction of arrow
+  R2 = asv_fit$vectors$r,
+  p_value = asv_fit$vectors$pvals
+)
+
+# 4. Correct for multiple testing across all ASVs
+envfit_results <- envfit_results %>%
+  mutate(p_adjusted = p.adjust(p_value, method = "fdr"))
+
+# 5. ISOLATE CANDIDATES FOR FM3 (PC1 Negative, PC2 Positive)
+# We look for high R2, significant p-adjusted, and arrows pointing top-left
+fm3_biomarker_candidates <- envfit_results %>%
+  dplyr::filter(p_adjusted < 0.05) %>%
+  dplyr::filter(Vector_PC1 < 0 & Vector_PC2 > 0) %>% 
+  arrange(desc(R2)) # Sort by strongest overall fit first
+
+# Export the clean, compositionally-sound results
+write_csv(envfit_results, "all_asv_envfit_results.csv")
+write_csv(fm3_biomarker_candidates, "fm3_top_asv_vectors.csv")
+
+###generate bar graphs of target ASV
+library(tidyverse)
+
+# 1. Define your exact list of target ASVs
+target_asvs <- c(
+  "RS-GCF-015235485.1-NZ-JADGLP010000315.1",
+  "RS-GCF-003671855.1-NZ-RAZM01000129.1",
+  "MJ006-2-barcode53-umi152854bins-ubs-3",
+  "MJ006-1-barcode40-umi135191bins-ubs-4"
+)
+
+# 2. Extract these specific ASVs from your rCLR-normalized table and merge with metadata
+selected_bar_data <- asv_rclr %>%
+  as.data.frame() %>%
+  dplyr::select(all_of(target_asvs)) %>%
+  mutate(Group = as.factor(metadata_table$Group)) %>%
+  rownames_to_column("sample_name")
+
+# 3. Pivot data into a long format for ggplot
+selected_bar_long <- selected_bar_data %>%
+  pivot_longer(
+    cols = all_of(target_asvs), 
+    names_to = "ASV_ID", 
+    values_to = "Normalized_Abundance"
+  )
+
+# Retain your original list order for the panel display
+selected_bar_long$ASV_ID <- factor(selected_bar_long$ASV_ID, levels = target_asvs)
+
+# 4. Generate the 2x2 Faceted Bar Graph with Mean, SE, and Jitter Points
+target_bar_plots <- ggplot(selected_bar_long, aes(x = Group, y = Normalized_Abundance, fill = Group)) +
+  # Faint baseline reference line at zero
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", alpha = 0.5) +
+  
+  # LAYER 1: Group Means as Bar Graphs (crisp black borders, slightly translucent fill)
+  stat_summary(fun = mean, geom = "bar", color = "black", alpha = 0.6, width = 0.7) +
+  
+  # LAYER 2: Individual Sample Points (semi-transparent, jittered so they don't stack)
+  geom_jitter(width = 0.2, size = 1.8, alpha = 0.4, shape = 16, color = "black") +
+  
+  # LAYER 3: Standard Error Bars (calculated automatically via mean_se)
+  stat_summary(fun.data = mean_se, geom = "errorbar", width = 0.25, color = "black", size = 0.8) +
+  
+  # Maintain your dynamic 9-group color mapping
+  scale_fill_manual(values = extended_colors) + 
+  
+  # Arrange into a symmetrical 2-column, 2-row grid layout
+  facet_wrap(~ ASV_ID, scales = "free_y", ncol = 2) +
+  theme_bw() +
+  labs(
+    title = "Target ASV Mean Abundances Across Experimental Groups",
+    subtitle = "Bars represent Group Mean ± Standard Error (SE) | Points represent individual samples (rCLR normalized)",
+    x = "Experimental Groups",
+    y = "Robust CLR-Normalized Abundance"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 9),
+    strip.text = element_text(face = "bold", size = 8), 
+    panel.grid.minor = element_blank(),
+    legend.position = "none" 
+  )
+
+# Render the grid to your R screen
+print(target_bar_plots)
+
+# 5. Save the image with optimized proportions for 4 panels
+ggsave(
+  filename = "fm3_selected_target_asv_barplots.png", 
+  plot = target_bar_plots, 
+  width = 10, 
+  height = 8, 
+  dpi = 300
+)
+
+#####test significance of FM3 specific features
+# ==============================================================================
+# MICROBIOME DIFFERENTIAL ABUNDANCE PIPELINE: rCLR + MaAsLin2 (Global FDR)
+# ==============================================================================
+
+# 1. Load Required Libraries
+library(compositions)
+library(Maaslin2)
+library(tidyverse)
+
+# 2. Define File Paths and Variables
+metadata_file <- "sm_metadata_treatments_diet_relative_body_mass.tsv"
+feature_file  <- "featuretable_gg2.tsv"
+output_dir    <- "maaslin2_FM3_results"
+
+# Store your 4 specific features of interest exactly as they appear in data
+target_features <- c(
+  "RS.GCF.003671855.1.NZ.RAZM01000129.1",
+  "RS.GCF.015235485.1.NZ.JADGLP010000315.1",
+  "MJ006.2.barcode53.umi152854bins.ubs.3",
+  "MJ006.1.barcode40.umi135191bins.ubs.4"
+)
+
+# 3. Load Data Matrices
+metadata_raw <- read.delim(metadata_file, sep = "\t", header = TRUE, check.names = FALSE)
+features_raw <- read.delim(feature_file, sep = "\t", header = TRUE, check.names = FALSE)
+
+# 4. Clean and Format Structures
+# Clean metadata: set sample names as row indices
+metadata <- metadata_raw %>% 
+  column_to_rownames("sample_name")
+
+# Clean features: set Feature_ID as row indices, transpose so samples are rows
+features_transposed <- features_raw %>% 
+  column_to_rownames("Feature_ID") %>% 
+  t() %>% 
+  as.data.frame()
+
+# Harmonize sample lists across both files
+common_samples <- intersect(rownames(metadata), rownames(features_transposed))
+metadata <- metadata[common_samples, , drop = FALSE]
+features_transposed <- features_transposed[common_samples, ]
+
+# 5. Set Factor Levels and Baseline Reference Group
+metadata$Group <- as.factor(metadata$Group)
+metadata$Group <- relevel(metadata$Group, ref = "FM3")
+
+# 6. Apply Robust CLR (rCLR) Transformation Globally
+# Operates on non-zero values per sample row; does not distort data structures
+rclr_transformed <- as.data.frame(clr(features_transposed))
+
+# 7. Run MaAsLin2 Pipeline on Complete Feature Matrix
+# This ensures multiple-testing corrections account for the post-hoc screening
+fit_data <- Maaslin2(
+  input_data     = rclr_transformed, 
+  input_metadata = metadata, 
+  output         = output_dir, 
+  fixed_effects  = c("Group"),
+  reference      = c("FM3"), 
+  normalization  = "NONE", # Data is normalized via rCLR
+  transform      = "NONE", # Data is log-transformed via rCLR
+  correction     = "BH",   # Benjamini-Hochberg global FDR correction
+  plot_heatmap   = FALSE,  # Speeds up processing for big datasets
+  plot_scatter   = FALSE
+)
+
+# 8. Extract and Filter Statistics for Your Four Target Features
+all_results <- read.delim(file.path(output_dir, "all_results.tsv"), sep = "\t", header = TRUE)
+
+target_results <- all_results %>% 
+  filter(feature %in% target_features) %>%
+  dplyr::select(feature, metadata, value, coef, stderr, pval, qval) %>%
+  arrange(feature, qval)
+
+# 9. Print Results directly to R Console
+print("--- TARGETED FEATURE MAASLIN2 RESULTS (GLOBAL FDR APPLIED) ---")
+print(target_results)
+
+# Optional: Save just these targeted results to a separate file
+write.table(target_results, file = "FM3_features_maaslin2_summary.tsv", sep = "\t", row.names = FALSE)
+
+
+
+###generate robust aitchison pcoa for all data including obese controls
+###repeat aitchison pcoa scatter plot, but add group centroids
+library(tidyverse)
+library(vegan)
+
+# 2. Load the input datasets
+feature_table <- read_tsv("featuretable_gg2.tsv") %>%
+  column_to_rownames("Feature_ID") %>%
+  t() %>%
+  as.data.frame()
+
+metadata_table <- read_tsv("sm_metadata_all_groups.tsv") %>%
+  column_to_rownames("sample_name")
+
+# Match rows across files exactly
+common_samples <- intersect(rownames(feature_table), rownames(metadata_table))
+feature_table <- feature_table[common_samples, ]
+metadata_table <- metadata_table[common_samples, ]
+
+# 3. Calculate Aitchison Distance and Perform PCoA
+dist_matrix <- vegdist(feature_table, method = "robust.aitchison")
+pcoa_res <- cmdscale(dist_matrix, k = 2, eig = TRUE)
+
+# Calculate correct variance percentages for the axes
+axis1_pct <- round((pcoa_res$eig[1] / sum(pcoa_res$eig)) * 100, 1)
+axis2_pct <- round((pcoa_res$eig[2] / sum(pcoa_res$eig)) * 100, 1)
+
+# Format the coordinates into a data frame
+plot_data <- data.frame(
+  PC1 = pcoa_res$points[, 1],
+  PC2 = pcoa_res$points[, 2],
+  Group = as.factor(metadata_table$Group)
+)
+
+# NEW: Calculate group centroids (mean coordinates per group)
+centroid_data <- plot_data %>%
+  group_by(Group) %>%
+  dplyr::summarize(PC1 = mean(PC1), PC2 = mean(PC2), .groups = 'drop')
+
+# 4. Handle Unlimited Groups (The Shape Fix)
+num_groups <- length(levels(plot_data$Group))
+extended_shapes <- c(16, 17, 15, 18, 19, 20, 8, 3, 4, 7, 9, 10, 11, 12, 13, 14, 0, 1, 2, 5, 6, 21, 22, 23, 24)[1:num_groups]
+extended_colors <- colorRampPalette(c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#565656"))(num_groups)
+
+# 5. Generate and Save the Plot
+pcoa_plot <- ggplot(plot_data, aes(x = PC1, y = PC2, color = Group, shape = Group)) +
+  # Individual sample points
+  geom_point(size = 4, alpha = 0.5) + 
+  # NEW: Overlaid centroid points (larger size, no transparency, black border outline)
+  geom_point(data = centroid_data, size = 7, stroke = 1.5, color = "black", alpha = 1) +
+  geom_point(data = centroid_data, size = 7, alpha = 1) +
+  # Scales and styling
+  scale_shape_manual(values = extended_shapes) +   
+  scale_color_manual(values = extended_colors) +   
+  theme_bw() +
+  labs(
+    title = "Aitchison PCoA Scatter Plot with Centroids",
+    subtitle = paste("Calculated via vegan | Total Groups:", num_groups),
+    x = paste0("PCoA 1 [", axis1_pct, "%]"),
+    y = paste0("PCoA 2 [", axis2_pct, "%]")
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_text(size = 11),
+    legend.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+# Display the plot
+print(pcoa_plot)
+
+####calculate beta group significance for all samples, including obese controls
+############################################################
+# ROBUST AITCHISON BETA-DIVERSITY ANALYSIS
+#
+# RStudio script
+#
+# Input:
+#   sm_metadata_all_groups.tsv
+#   featuretable_gg2.tsv
+#
+# Output:
+#   permdisp_results.csv
+#   pairwise_robust_aitchison_permanova_results.csv
+#
+# Workflow:
+#
+#   1. Robust Aitchison distance using vegan
+#   2. Global PERMDISP
+#   3. Pairwise PERMANOVA using adonis2
+#   4. Benjamini-Hochberg FDR correction
+#
+# IMPORTANT:
+# PERMANOVA is performed regardless of the PERMDISP result.
+# If PERMDISP is significant, this is reported in the output
+# as an important qualification of the PERMANOVA results.
+#
+############################################################
+
+
+# ============================================================
+# 1. SETTINGS
+# ============================================================
+
+metadata_file <- "sm_metadata_all_groups.tsv"
+
+featuretable_file <- "featuretable_gg2.tsv"
+
+permdisp_output <- "permdisp_results.csv"
+
+permanova_output <-
+  "pairwise_robust_aitchison_permanova_results.csv"
+
+# Number of permutations
+n_permutations <- 9999
+
+# Significance threshold
+alpha <- 0.05
+
+# Reproducibility
+random_seed <- 12345
+
+
+# ============================================================
+# 2. LOAD VEGAN
+# ============================================================
+
+if (!requireNamespace("vegan", quietly = TRUE)) {
+  install.packages("vegan")
+}
+
+library(vegan)
+
+
+# ============================================================
+# 3. READ INPUT FILES
+# ============================================================
+
+cat("\nReading input files...\n")
+
+metadata <- read.delim(
+  metadata_file,
+  header = TRUE,
+  sep = "\t",
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+featuretable <- read.delim(
+  featuretable_file,
+  header = TRUE,
+  sep = "\t",
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+
+# ============================================================
+# 4. CHECK REQUIRED COLUMNS
+# ============================================================
+
+if (!"sample_name" %in% colnames(metadata)) {
+  stop(
+    "ERROR: 'sample_name' column was not found in metadata."
+  )
+}
+
+if (!"Group" %in% colnames(metadata)) {
+  stop(
+    "ERROR: 'Group' column was not found in metadata."
+  )
+}
+
+if (!"Feature_ID" %in% colnames(featuretable)) {
+  stop(
+    "ERROR: 'Feature_ID' column was not found in feature table."
+  )
+  
+  
+}
+
+
+# ============================================================
+# 5. CHECK FOR DUPLICATE IDENTIFIERS
+# ============================================================
+
+if (anyDuplicated(metadata$sample_name)) {
+  stop(
+    "ERROR: Duplicate sample_name values were found."
+  )
+}
+
+if (anyDuplicated(featuretable$Feature_ID)) {
+  stop(
+    "ERROR: Duplicate Feature_ID values were found."
+  )
+}
+
+
+# ============================================================
+# 6. FIND SHARED SAMPLES
+# ============================================================
+
+metadata_samples <- metadata$sample_name
+
+featuretable_samples <- colnames(featuretable)[
+  colnames(featuretable) != "Feature_ID"
+]
+
+shared_samples <- intersect(
+  metadata_samples,
+  featuretable_samples
+)
+
+cat(
+  "\nSamples in metadata:",
+  length(metadata_samples),
+  "\n"
+)
+
+cat(
+  "Samples in feature table:",
+  length(featuretable_samples),
+  "\n"
+)
+
+cat(
+  "Shared samples:",
+  length(shared_samples),
+  "\n"
+)
+
+if (length(shared_samples) < 2) {
+  stop(
+    "ERROR: Fewer than two shared samples were found."
+  )
+}
+
+
+# ============================================================
+# 7. RESTRICT DATA TO SHARED SAMPLES
+# ============================================================
+
+metadata <- metadata[
+  match(
+    shared_samples,
+    metadata$sample_name
+  ),
+  ,
+  drop = FALSE
+]
+
+featuretable <- featuretable[
+  ,
+  c(
+    "Feature_ID",
+    shared_samples
+  ),
+  drop = FALSE
+]
+
+rownames(metadata) <- metadata$sample_name
+
+
+# ============================================================
+# 8. CONVERT FEATURE TABLE TO NUMERIC
+# ============================================================
+
+cat("\nPreparing feature table...\n")
+
+feature_matrix <- as.matrix(
+  featuretable[
+    ,
+    shared_samples,
+    drop = FALSE
+  ]
+)
+
+suppressWarnings(
+  mode(feature_matrix) <- "numeric"
+)
+
+if (anyNA(feature_matrix)) {
+  stop(
+    "ERROR: NA values were detected in the feature table."
+  )
+}
+
+if (any(feature_matrix < 0)) {
+  stop(
+    "ERROR: Negative abundance values were detected."
+  )
+}
+
+
+# ============================================================
+# 9. REMOVE FEATURES ABSENT FROM ALL SAMPLES
+# ============================================================
+
+keep_features <- rowSums(
+  feature_matrix
+) > 0
+
+feature_matrix <- feature_matrix[
+  keep_features,
+  ,
+  drop = FALSE
+]
+
+cat(
+  "Features retained:",
+  nrow(feature_matrix),
+  "\n"
+)
+
+
+# ============================================================
+# 10. TRANSPOSE TO SAMPLE × FEATURE
+# ============================================================
+
+otu <- t(feature_matrix)
+
+rownames(otu) <- shared_samples
+
+
+# ============================================================
+# 11. CHECK FOR ZERO-ABUNDANCE SAMPLES
+# ============================================================
+
+sample_totals <- rowSums(otu)
+
+if (any(sample_totals == 0)) {
+  
+  zero_samples <- names(
+    sample_totals[
+      sample_totals == 0
+    ]
+  )
+  
+  stop(
+    "ERROR: Samples with zero total abundance:\n",
+    paste(
+      zero_samples,
+      collapse = ", "
+    )
+  )
+}
+
+
+# ============================================================
+# 12. PREPARE GROUP VARIABLE
+# ============================================================
+
+metadata$Group <- factor(
+  metadata$Group
+)
+
+if (nlevels(metadata$Group) < 2) {
+  stop(
+    "ERROR: At least two groups are required."
+  )
+}
+
+cat("\nGroup sizes:\n")
+
+print(
+  table(metadata$Group)
+)
+
+
+# ============================================================
+# 13. VERIFY SAMPLE ORDER
+# ============================================================
+
+metadata <- metadata[
+  match(
+    rownames(otu),
+    metadata$sample_name
+  ),
+  ,
+  drop = FALSE
+]
+
+if (!all(
+  rownames(otu) ==
+  metadata$sample_name
+)) {
+  
+  stop(
+    "ERROR: Sample order does not match between ",
+    "feature table and metadata."
+  )
+}
+
+
+# ============================================================
+# 14. ROBUST AITCHISON DISTANCE
+# ============================================================
+
+cat("\n")
+cat("============================================\n")
+cat("ROBUST AITCHISON DISTANCE\n")
+cat("============================================\n")
+
+cat(
+  "Calculating robust Aitchison distances...\n"
+)
+
+robust_aitchison <- vegdist(
+  otu,
+  method = "robust.aitchison"
+)
+
+cat(
+  "Robust Aitchison calculation complete.\n"
+)
+
+
+# ============================================================
+# 15. GLOBAL PERMDISP
+# ============================================================
+
+cat("\n")
+cat("============================================\n")
+cat("GLOBAL PERMDISP\n")
+cat("============================================\n")
+
+dispersion <- betadisper(
+  robust_aitchison,
+  metadata$Group,
+  type = "centroid"
+)
+
+set.seed(random_seed)
+
+permdisp_test <- permutest(
+  dispersion,
+  permutations = n_permutations
+)
+
+print(
+  permdisp_test
+)
+
+
+# ============================================================
+# 16. EXTRACT PERMDISP RESULTS
+# ============================================================
+
+permdisp_F <- permdisp_test$tab[
+  1,
+  "F"
+]
+
+permdisp_p <- permdisp_test$tab[
+  1,
+  "Pr(>F)"
+]
+
+permdisp_significant <- (
+  permdisp_p < alpha
+)
+
+
+permdisp_results <- data.frame(
+  
+  Test = "Global PERMDISP",
+  
+  F_statistic = permdisp_F,
+  
+  P_value = permdisp_p,
+  
+  Significant = ifelse(
+    permdisp_significant,
+    "Yes",
+    "No"
+  ),
+  
+  permutations = n_permutations
+  
+)
+
+
+write.csv(
+  permdisp_results,
+  permdisp_output,
+  row.names = FALSE
+)
+
+
+# ============================================================
+# 17. REPORT PERMDISP
+# ============================================================
+
+cat("\n")
+cat("============================================\n")
+cat("PERMDISP SUMMARY\n")
+cat("============================================\n")
+
+cat(
+  "PERMDISP F =",
+  permdisp_F,
+  "\n"
+)
+
+cat(
+  "PERMDISP P =",
+  permdisp_p,
+  "\n"
+)
+
+if (permdisp_significant) {
+  
+  cat(
+    "\nPERMDISP is SIGNIFICANT.\n"
+  )
+  
+  cat(
+    "Group dispersions differ significantly.\n"
+  )
+  
+  cat(
+    "PERMANOVA will nevertheless be performed,\n"
+  )
+  
+  cat(
+    "but the PERMANOVA results should be interpreted\n"
+  )
+  
+  cat(
+    "with this dispersion effect in mind.\n"
+  )
+  
+} else {
+  
+  cat(
+    "\nPERMDISP is NOT significant.\n"
+  )
+  
+  cat(
+    "There is no evidence of significant differences\n"
+  )
+  
+  cat(
+    "in multivariate dispersion among groups.\n"
+  )
+  
+}
+
+cat(
+  "\nPERMDISP results saved to:",
+  permdisp_output,
+  "\n"
+)
+
+
+# ============================================================
+# 18. PAIRWISE PERMANOVA
+# ============================================================
+#
+# IMPORTANT:
+#
+# PERMANOVA is performed regardless of whether PERMDISP
+# is significant.
+#
+# ============================================================
+
+cat("\n")
+cat("============================================\n")
+cat("PAIRWISE PERMANOVA\n")
+cat("============================================\n")
+
+groups <- levels(
+  metadata$Group
+)
+
+pairwise_results <- list()
+
+counter <- 1
+
+
+for (i in seq_len(
+  length(groups) - 1
+)) {
+  
+  for (j in (i + 1):length(groups)) {
+    
+    group1 <- groups[i]
+    
+    group2 <- groups[j]
+    
+    
+    cat("\n")
+    cat("--------------------------------------------\n")
+    
+    cat(
+      "Testing:",
+      group1,
+      "vs",
+      group2,
+      "\n"
+    )
+    
+    cat("--------------------------------------------\n")
+    
+    
+    # --------------------------------------------------------
+    # Select the two groups
+    # --------------------------------------------------------
+    
+    keep <- metadata$Group %in% c(
+      group1,
+      group2
+    )
+    
+    sub_metadata <- metadata[
+      keep,
+      ,
+      drop = FALSE
+    ]
+    
+    sample_names <- sub_metadata$sample_name
+    
+    
+    # --------------------------------------------------------
+    # Subset robust Aitchison distances
+    # --------------------------------------------------------
+    
+    distance_matrix <- as.matrix(
+      robust_aitchison
+    )
+    
+    sub_distance_matrix <- distance_matrix[
+      sample_names,
+      sample_names,
+      drop = FALSE
+    ]
+    
+    sub_distance <- as.dist(
+      sub_distance_matrix
+    )
+    
+    
+    # --------------------------------------------------------
+    # PERMANOVA
+    # --------------------------------------------------------
+    
+    set.seed(
+      random_seed
+    )
+    
+    adonis_result <- adonis2(
+      sub_distance ~ Group,
+      data = sub_metadata,
+      permutations = n_permutations,
+      by = "terms"
+    )
+    
+    
+    # --------------------------------------------------------
+    # Extract statistics
+    # --------------------------------------------------------
+    
+    pseudo_F <- adonis_result$F[1]
+    
+    r2 <- adonis_result$R2[1]
+    
+    p_value <- adonis_result$`Pr(>F)`[1]
+    
+    
+    # --------------------------------------------------------
+    # Save result
+    # --------------------------------------------------------
+    
+    pairwise_results[[counter]] <- data.frame(
+      
+      Group1 = group1,
+      
+      Group2 = group2,
+      
+      N_Group1 = sum(
+        sub_metadata$Group ==
+          group1
+      ),
+      
+      N_Group2 = sum(
+        sub_metadata$Group ==
+          group2
+      ),
+      
+      Pseudo_F = pseudo_F,
+      
+      R2 = r2,
+      
+      P_value = p_value,
+      
+      stringsAsFactors = FALSE
+      
+    )
+    
+    
+    cat(
+      "Pseudo-F:",
+      pseudo_F,
+      "\n"
+    )
+    
+    cat(
+      "R2:",
+      r2,
+      "\n"
+    )
+    
+    cat(
+      "P-value:",
+      p_value,
+      "\n"
+    )
+    
+    
+    counter <- counter + 1
+    
+  }
+}
+
+
+# ============================================================
+# 19. COMBINE PAIRWISE RESULTS
+# ============================================================
+
+pairwise_results <- do.call(
+  rbind,
+  pairwise_results
+)
+
+
+# ============================================================
+# 20. FDR CORRECTION
+# ============================================================
+#
+# Benjamini-Hochberg correction is applied across ALL
+# pairwise PERMANOVA comparisons.
+#
+# ============================================================
+
+pairwise_results$Q_value <- p.adjust(
+  pairwise_results$P_value,
+  method = "BH"
+)
+
+
+# ============================================================
+# 21. ADD SIGNIFICANCE
+# ============================================================
+
+pairwise_results$Significant_FDR <-
+  ifelse(
+    pairwise_results$Q_value < alpha,
+    "Yes",
+    "No"
+  )
+
+
+# ============================================================
+# 22. ADD PERMDISP INFORMATION
+# ============================================================
+
+pairwise_results$Global_PERMDISP_P <-
+  permdisp_p
+
+pairwise_results$Global_PERMDISP_Significant <-
+  ifelse(
+    permdisp_significant,
+    "Yes",
+    "No"
+  )
+
+
+# ============================================================
+# 23. ORDER RESULTS
+# ============================================================
+
+pairwise_results <- pairwise_results[
+  order(
+    pairwise_results$Q_value,
+    pairwise_results$P_value
+  ),
+]
+
+
+# ============================================================
+# 24. EXPORT RESULTS
+# ============================================================
+
+write.csv(
+  pairwise_results,
+  permanova_output,
+  row.names = FALSE
+)
+
+
+# ============================================================
+# 25. PRINT FINAL RESULTS
+# ============================================================
+
+cat("\n")
+cat("============================================\n")
+cat("PAIRWISE PERMANOVA RESULTS\n")
+cat("============================================\n\n")
+
+print(
+  pairwise_results
+)
+
+
+###Identify taxonomic changes due to meat intake and graph on a cladogram
+# =========================================================================
+# 1. LOAD REQUIRED LIBRARIES
+# =========================================================================
+library(tidyverse)
+library(vegan)
+library(Maaslin2)
+library(tidygraph)
+library(ggraph)
+library(igraph)
+
+# =========================================================================
+# 2. FILE PATH DEFINITIONS (Verify these files are in your active directory)
+# =========================================================================
+feature_table_file <- "featuretable_gg2.tsv"
+metadata_all_file  <- "sm_metadata_all_groups.tsv"
+taxonomy_file      <- "taxonomy_gg2.tsv"
+
+# =========================================================================
+# 3. LOAD AND FILTER RAW MICROBIOME & METADATA FILES
+# =========================================================================
+# Load raw sequence feature count matrix 
+# check.names = FALSE keeps R from changing your hyphens into periods!
+feature_table <- read_tsv(feature_table_file) %>%
+  column_to_rownames("Feature_ID") %>%
+  t() %>%
+  as.data.frame(check.names = FALSE) 
+
+# Load comprehensive metadata table
+metadata_all <- read_tsv(metadata_all_file) %>%
+  column_to_rownames("sample_name")
+
+# Target exactly your 4 specified groups and break into clear fixed-effect factors
+metadata_filtered <- metadata_all %>%
+  rownames_to_column("sample_name") %>%
+  filter(Group %in% c("OC", "OM", "MSM", "MSC")) %>%
+  mutate(
+    # Create Meat factor: OM and MSM consumed meat
+    Meat_Intake = factor(if_else(Group %in% c("OM", "MSM"), "Yes", "No"), levels = c("No", "Yes")),
+    # Create Metabolic Syndrome factor: MSM and MSC consumed MetS diet
+    MetS_Diet = factor(if_else(Group %in% c("MSM", "MSC"), "Yes", "No"), levels = c("No", "Yes"))
+  ) %>%
+  column_to_rownames("sample_name")
+
+# Intersect samples to ensure rows perfectly line up across count tables
+common_samples    <- intersect(rownames(feature_table), rownames(metadata_filtered))
+feature_filtered  <- feature_table[common_samples, ]
+metadata_filtered <- metadata_filtered[common_samples, ]
+
+# Parse taxonomy string hierarchy
+tax_raw <- read_tsv(taxonomy_file)
+tax_table <- tax_raw %>%
+  separate_wider_delim(
+    cols = Taxon, # Matches your actual column name 'Taxon'
+    delim = ";", 
+    names = c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"),
+    too_few = "align_start"
+  ) %>%
+  mutate(across(everything(), ~ str_trim(.x)))
+
+# =========================================================================
+# 4. RUN MAASLIN2 AT THE CORE ASV LEVEL
+# =========================================================================
+message("Running MaAsLin2 at baseline ASV level...")
+maaslin_asv <- Maaslin2(
+  input_data      = feature_filtered,
+  input_metadata  = metadata_filtered,
+  output          = "standalone_maaslin2_asv",
+  fixed_effects   = c("Meat_Intake", "MetS_Diet"),
+  normalization   = "TSS",
+  transform       = "LOG",
+  analysis_method = "LM",
+  correction      = "BH",
+  plot_heatmap    = FALSE,
+  plot_scatter    = FALSE,
+  min_abundance   = 0.0,
+  min_prevalence  = 0.1
+)
+
+# Collect baseline Meat Intake results
+all_maaslin_hits <- list()
+all_maaslin_hits[["ASV"]] <- read_tsv("standalone_maaslin2_asv/all_results.tsv") %>%
+  dplyr::filter(metadata == "Meat_Intake") %>%
+  mutate(Rank = "ASV")
+
+# =========================================================================
+# 5. LOOP MAASLIN2 ACROSS HIGHER TAXONOMIC RANKS (Base R Matrix Style)
+# =========================================================================
+ranks <- c("Species", "Genus", "Family", "Order", "Class", "Phylum")
+
+for (r in ranks) {
+  message(paste("Aggregating and running MaAsLin2 for rank:", r))
+  
+  # Isolate mapping of ASV IDs to current rank from your parsed tax_table
+  rank_mapping <- tax_table %>%
+    dplyr::select(Feature_ID, Target_Rank = !!sym(r)) %>%
+    dplyr::filter(!is.na(Target_Rank), Target_Rank != "", !str_detect(Target_Rank, "__$"))
+  
+  # Intersect to find ASVs present in both the count table and taxonomy mapping
+  common_asvs <- intersect(colnames(feature_filtered), rank_mapping$Feature_ID)
+  
+  # Slice and filter the map and feature matrix down to matching features
+  sub_map      <- rank_mapping %>% dplyr::filter(Feature_ID %in% common_asvs)
+  sub_features <- as.matrix(feature_filtered[, common_asvs])
+  
+  # Base R split-apply matrix aggregation to bypass SummarizedExperiment crashes
+  unique_ranks <- unique(sub_map$Target_Rank)
+  features_with_tax_mat <- matrix(0, nrow = nrow(sub_features), ncol = length(unique_ranks),
+                                  dimnames = list(rownames(sub_features), unique_ranks))
+  
+  for(u_rank in unique_ranks) {
+    asvs_in_rank <- sub_map$Feature_ID[sub_map$Target_Rank == u_rank]
+    if(length(asvs_in_rank) == 1) {
+      features_with_tax_mat[, u_rank] <- sub_features[, asvs_in_rank]
+    } else {
+      features_with_tax_mat[, u_rank] <- rowSums(sub_features[, asvs_in_rank])
+    }
+  }
+  
+  features_with_tax <- as.data.frame(features_with_tax_mat)
+  
+  output_dir <- paste0("standalone_maaslin2_", tolower(r))
+  
+  fit_rank <- Maaslin2(
+    input_data      = features_with_tax,
+    input_metadata  = metadata_filtered,
+    output          = output_dir,
+    fixed_effects   = c("Meat_Intake", "MetS_Diet"),
+    normalization   = "TSS",
+    transform       = "LOG",
+    analysis_method = "LM",
+    correction      = "BH",
+    plot_heatmap    = FALSE,
+    plot_scatter    = FALSE
+  )
+  
+  all_maaslin_hits[[r]] <- read_tsv(paste0(output_dir, "/all_results.tsv")) %>%
+    dplyr::filter(metadata == "Meat_Intake") %>%
+    mutate(Rank = r)
+}
+
+# Consolidate all levels, clean MaAsLin2 period-mangling, and map directions
+master_sig_cleaned <- bind_rows(all_maaslin_hits) %>%
+  dplyr::filter(qval < 0.05) %>%
+  mutate(
+    Direction = if_else(coef > 0, "Meat_Enriched", "Meat_Depleted"),
+    # Fix MaAsLin2's internal period-conversion on features to ensure a perfect text match
+    feature_repaired = if_else(Rank == "ASV", gsub("[.]", "-", feature), gsub("[.]", "-", feature))
+  )
+
+write_csv(master_sig_cleaned, "master_standalone_meat_sig_results.csv")
+
+
+# =========================================================================
+# 6. FILTER LINEAGES AND ASSEMBLE GRAPH STRUCTURE (GENUS TIPS - MEAT)
+# =========================================================================
+message("Building taxonomy cladogram tree structures at Genus level...")
+
+# Isolate the significant Genus names directly from your multi-rank results table
+sig_genera_meat <- master_sig_cleaned %>%
+  dplyr::filter(Rank == "Genus") %>%
+  pull(feature_repaired)
+
+# Filter full hierarchy table down to rows containing these significant genera
+tax_subset_genus <- tax_table %>%
+  dplyr::filter(Genus %in% sig_genera_meat)
+
+# Build nested text edges terminating strictly at Genus level (Removes Species and ASV)
+edges_genus <- bind_rows(
+  tax_subset_genus %>% dplyr::select(from = Kingdom, to = Phylum),
+  tax_subset_genus %>% dplyr::select(from = Phylum, to = Class),
+  tax_subset_genus %>% dplyr::select(from = Class, to = Order),
+  tax_subset_genus %>% dplyr::select(from = Order, to = Family),
+  tax_subset_genus %>% dplyr::select(from = Family, to = Genus)
+) %>% 
+  distinct() %>%
+  dplyr::filter(!is.na(from) & !is.na(to) & from != "" & to != "")
+
+# Compile unique node properties
+unique_nodes_genus <- unique(c(edges_genus$from, edges_genus$to))
+
+# Base R index matching to map MaAsLin2 results to these nodes
+match_idx_genus <- match(unique_nodes_genus, master_sig_cleaned$feature_repaired)
+extracted_directions_genus <- master_sig_cleaned$Direction[match_idx_genus]
+
+nodes_df_genus <- data.frame(
+  node_name      = unique_nodes_genus,
+  Direction      = extracted_directions_genus,
+  stringsAsFactors = FALSE
+)
+
+# Clean labels for presentation
+nodes_df_genus$Display_Label <- gsub("^[a-z]__", "", nodes_df_genus$node_name)
+nodes_df_genus$Plot_Direction <- nodes_df_genus$Direction
+nodes_df_genus$Plot_Direction[is.na(nodes_df_genus$Plot_Direction)] <- "Not_Significant"
+
+# Initialize the tidygraph network layout object
+tax_tree_graph_genus <- tbl_graph(nodes = nodes_df_genus, edges = edges_genus, directed = TRUE)
+
+# =========================================================================
+# 7. GENERATE AND EXPORT FINAL HIGH-RESOLUTION CLADOGRAM (GENUS TIPS - MEAT)
+# =========================================================================
+message("Rendering circular Genus-level Meat Intake taxonomic cladogram...")
+
+cladogram_plot_genus <- ggraph(tax_tree_graph_genus, layout = "dendrogram", circular = TRUE) +
+  geom_edge_diagonal(color = "gray40", alpha = 0.8, size = 0.5) +
+  geom_node_point(aes(color = Plot_Direction, size = Plot_Direction), alpha = 0.9) +
+  
+  # Text Labels Layer: Labels ALL visible nodes since the tree layout is no longer cluttered
+  geom_node_text(aes(label = if_else(node_name == "d__Bacteria" | Display_Label == "", "", Display_Label)), 
+                 size = 2.8, repel = TRUE, fontface = "bold", color = "black") +
+  
+  scale_size_manual(
+    values = c("Meat_Enriched" = 5.0, "Meat_Depleted" = 5.0, "Not_Significant" = 1.5),
+    guide = "none"
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "Meat_Enriched"   = "#D55E00", 
+      "Meat_Depleted"   = "#0072B2", 
+      "Not_Significant" = "gray88"   
+    ),
+    breaks = c("Meat_Enriched", "Meat_Depleted"),
+    labels = c("Significantly Meat Enriched", "Significantly Meat Depleted")
+  ) +
+  theme_void() +
+  labs(
+    title = "Genus-Level Taxonomic Cladogram: Meat Intake Associated Ranks",
+    subtitle = "Tree tips represent Genera | Nodes colored strictly if that specific taxonomic tier independently passed MaAsLin2 (q < 0.05)",
+    color = "MaAsLin2 Significance"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    plot.subtitle = element_text(size = 9, hjust = 0.5, color = "gray30"),
+    legend.position = "right"
+  )
+
+print(cladogram_plot_genus)
+ggsave("meat_intake_genus_cladogram.png", plot = cladogram_plot_genus, width = 12, height = 12, dpi = 300)
+
+
+###repeat graph for met syn diet
+# =========================================================================
+# 5. CONSOLIDATE RESULTS FOR METS DIET ACROSS RANKS (ORIGINAL PATHS)
+# =========================================================================
+message("Consolidating multi-rank MaAsLin2 hits for the MetS Diet...")
+
+all_maaslin_hits_mets <- list()
+
+# Extract ASV level results for MetS_Diet
+all_maaslin_hits_mets[["ASV"]] <- read_tsv("standalone_maaslin2_asv/all_results.tsv") %>%
+  dplyr::filter(metadata == "MetS_Diet") %>%
+  mutate(Rank = "ASV")
+
+# Extract higher rank levels for MetS_Diet from existing folders
+for (r in ranks) {
+  output_dir <- paste0("standalone_maaslin2_", tolower(r))
+  all_maaslin_hits_mets[[r]] <- read_tsv(paste0(output_dir, "/all_results.tsv")) %>%
+    dplyr::filter(metadata == "MetS_Diet") %>%
+    mutate(Rank = r)
+}
+
+# Consolidate all levels, clean MaAsLin2 period-mangling, and map directions
+master_sig_mets <- bind_rows(all_maaslin_hits_mets) %>%
+  dplyr::filter(qval < 0.05) %>%
+  mutate(
+    # Direction labels for MetS Diet
+    Direction = if_else(coef > 0, "MetS_Enriched", "MetS_Depleted"),
+    feature_repaired = gsub("[.]", "-", feature)
+  )
+
+# Export the master statistics table for the MetS Diet
+write_csv(master_sig_mets, "master_standalone_mets_diet_sig_results.csv")
+
+# =========================================================================
+# 6. FILTER LINEAGES AND ASSEMBLE GRAPH STRUCTURE (GENUS TIPS - METS DIET)
+# =========================================================================
+message("Building taxonomy cladogram tree structures at Genus level for MetS Diet...")
+
+# Isolate the significant Genus names directly from your MetS table
+sig_genera_mets <- master_sig_mets %>%
+  dplyr::filter(Rank == "GENUS" | Rank == "Genus") %>%
+  pull(feature_repaired)
+
+# Filter full hierarchy table down to rows containing these significant genera
+tax_subset_mets_genus <- tax_table %>%
+  dplyr::filter(Genus %in% sig_genera_mets)
+
+# Build nested text edges terminating strictly at Genus level
+edges_mets_genus <- bind_rows(
+  tax_subset_mets_genus %>% dplyr::select(from = Kingdom, to = Phylum),
+  tax_subset_mets_genus %>% dplyr::select(from = Phylum, to = Class),
+  tax_subset_mets_genus %>% dplyr::select(from = Class, to = Order),
+  tax_subset_mets_genus %>% dplyr::select(from = Order, to = Family),
+  tax_subset_mets_genus %>% dplyr::select(from = Family, to = Genus)
+) %>% 
+  distinct() %>%
+  dplyr::filter(!is.na(from) & !is.na(to) & from != "" & to != "")
+
+# Compile unique node properties
+unique_nodes_mets_genus <- unique(c(edges_mets_genus$from, edges_mets_genus$to))
+
+# Base R index matching to map MaAsLin2 results to these nodes
+match_idx_mets_genus <- match(unique_nodes_mets_genus, master_sig_mets$feature_repaired)
+extracted_directions_mets_genus <- master_sig_mets$Direction[match_idx_mets_genus]
+
+nodes_df_mets_genus <- data.frame(
+  node_name      = unique_nodes_mets_genus,
+  Direction      = extracted_directions_mets_genus,
+  stringsAsFactors = FALSE
+)
+
+# Clean labels for presentation
+nodes_df_mets_genus$Display_Label <- gsub("^[a-z]__", "", nodes_df_mets_genus$node_name)
+nodes_df_mets_genus$Plot_Direction <- nodes_df_mets_genus$Direction
+nodes_df_mets_genus$Plot_Direction[is.na(nodes_df_mets_genus$Plot_Direction)] <- "Not_Significant"
+
+# Initialize the tidygraph network layout object
+tax_tree_graph_mets_genus <- tbl_graph(nodes = nodes_df_mets_genus, edges = edges_mets_genus, directed = TRUE)
+
+# =========================================================================
+# 7. GENERATE AND EXPORT FINAL HIGH-RESOLUTION CLADOGRAM (GENUS TIPS - METS DIET)
+# =========================================================================
+message("Rendering circular Genus-level MetS Diet taxonomic cladogram...")
+
+cladogram_plot_mets_genus <- ggraph(tax_tree_graph_mets_genus, layout = "dendrogram", circular = TRUE) +
+  geom_edge_diagonal(color = "gray30", alpha = 0.8, size = 0.5) +
+  geom_node_point(aes(color = Plot_Direction, size = Plot_Direction), alpha = 0.9) +
+  
+  # Text Labels Layer
+  geom_node_text(aes(label = if_else(node_name == "d__Bacteria" | Display_Label == "", "", Display_Label)), 
+                 size = 1.5, repel = TRUE, fontface = "bold", color = "black") +
+  
+  scale_size_manual(
+    values = c("MetS_Enriched" = 2.0, "MetS_Depleted" = 2.0, "Not_Significant" = 1.5),
+    guide = "none"
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "MetS_Enriched"   = "#D55E00", # Orange
+      "MetS_Depleted"   = "#0072B2", # Blue
+      "Not_Significant" = "gray88"   
+    ),
+    breaks = c("MetS_Enriched", "MetS_Depleted"),
+    labels = c("Significantly MetS Diet Enriched", "Significantly MetS Diet Depleted")
+  ) +
+  theme_void() +
+  labs(
+    title = "Genus-Level Taxonomic Cladogram: Metabolic Syndrome Diet Associated Ranks",
+    subtitle = "Tree tips represent Genera | Nodes colored strictly if that specific taxonomic tier independently passed MaAsLin2 (q < 0.05)",
+    color = "MaAsLin2 Significance"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    plot.subtitle = element_text(size = 9, hjust = 0.5, color = "gray30"),
+    legend.position = "right"
+  )
+
+print(cladogram_plot_mets_genus)
+
+
+##### Find ASV associated with phenotypic variables
+# ============================================================
+# MaAsLin2 sample-level analysis
+#
+# Predictors:
+#   1. Cecum_mass/Body_mass
+#   2. Leptin
+#   3. Visceral_Fat_mass/Body_mass
+#   4. HDL_cholesterol
+#
+# Workflow:
+#   Raw ASV counts
+#       ↓
+#   TSS normalization
+#       ↓
+#   Prevalence filter: ASV present in >= 7 samples
+#       ↓
+#   Pseudocount + log2 transformation
+#       ↓
+#   Sample-level ASV data
+#       ↓
+#   MaAsLin2, one predictor at a time
+#       ↓
+#   Group included as a random effect
+#       ↓
+#   Collect significant ASVs
+#       ↓
+#   Heatmap of MaAsLin2 coefficients
+# ============================================================
+
+
+# ============================================================
+# 1. Load packages
+# ============================================================
+
+library(tidyverse)
+library(pheatmap)
+library(Maaslin2)
+
+
+# ============================================================
+# 2. Read data
+# ============================================================
+
+metadata <- read_tsv(
+  "sm_metadata_treatments_diet_relative_body_mass.tsv",
+  show_col_types = FALSE
+)
+
+feature_table <- read_tsv(
+  "featuretable_gg2.tsv",
+  show_col_types = FALSE
+)
+
+
+# ============================================================
+# 3. Convert feature table to ASV matrix
+# ============================================================
+
+asv_matrix <- feature_table %>%
+  column_to_rownames("Feature_ID") %>%
+  as.matrix()
+
+
+# ============================================================
+# 4. Keep only samples present in BOTH datasets
+# ============================================================
+
+common_samples <- intersect(
+  metadata$sample_name,
+  colnames(asv_matrix)
+)
+
+metadata <- metadata %>%
+  filter(sample_name %in% common_samples)
+
+asv_matrix <- asv_matrix[, metadata$sample_name]
+
+
+# Check dimensions
+cat("Number of samples:", ncol(asv_matrix), "\n")
+cat("Number of ASVs:", nrow(asv_matrix), "\n")
+
+
+# ============================================================
+# 5. TSS normalization
+# ============================================================
+
+tss_matrix <- apply(
+  asv_matrix,
+  2,
+  function(x) x / sum(x)
+)
+
+
+# ============================================================
+# 6. Prevalence filtering
+#
+# Retain ASVs present in >= 7 samples.
+#
+# "Present" = abundance > 0 in the original count table.
+# ============================================================
+
+prevalence_counts <- rowSums(asv_matrix > 0)
+
+prevalence_table <- tibble(
+  Feature_ID = rownames(asv_matrix),
+  prevalence = prevalence_counts,
+  prevalence_proportion =
+    prevalence_counts / ncol(asv_matrix),
+  retained = prevalence_counts >= 7
+)
+
+write_tsv(
+  prevalence_table,
+  "ASV_prevalence_filter_results_sample_level.tsv"
+)
+
+keep_asvs <- prevalence_counts >= 7
+
+tss_matrix_filtered <- tss_matrix[keep_asvs, ]
+
+cat(
+  "ASVs retained after prevalence filtering:",
+  nrow(tss_matrix_filtered),
+  "\n"
+)
+
+
+# ============================================================
+# 7. Add pseudocount and log2 transform
+# ============================================================
+
+log2_asv_matrix <- log2(
+  tss_matrix_filtered + 1e-5
+)
+
+
+# ============================================================
+# 8. Prepare ASV data for MaAsLin2
+#
+# Rows = samples
+# Columns = ASVs
+# ============================================================
+
+asv_data <- as.data.frame(
+  t(log2_asv_matrix)
+)
+
+asv_data$sample_name <- rownames(asv_data)
+
+rownames(asv_data) <- NULL
+
+asv_data <- asv_data %>%
+  column_to_rownames("sample_name")
+
+
+# ============================================================
+# 9. Prepare metadata
+# ============================================================
+
+metadata <- metadata %>%
+  filter(sample_name %in% rownames(asv_data))
+
+metadata <- metadata[
+  match(
+    rownames(asv_data),
+    metadata$sample_name
+  ),
+]
+
+metadata <- as.data.frame(metadata)
+
+rownames(metadata) <- metadata$sample_name
+
+
+# Check alignment
+stopifnot(
+  identical(
+    rownames(asv_data),
+    rownames(metadata)
+  )
+)
+
+
+# ============================================================
+# SAMPLE-LEVEL MaAsLin2 ANALYSIS
+# Safe predictor names for MaAsLin2
+# ============================================================
+
+# Create simple predictor aliases
+metadata$Cecum_mass_Body_mass <- metadata$`Cecum_mass/Body_mass`
+metadata$Visceral_Fat_mass_Body_mass <- metadata$`Visceral_Fat_mass/Body_mass`
+
+# Predictors used by MaAsLin2
+predictors_maaslin <- c(
+  "Cecum_mass_Body_mass",
+  "Leptin",
+  "Visceral_Fat_mass_Body_mass",
+  "HDL_cholesterol"
+)
+
+# Labels used later in the heatmap
+predictor_labels <- c(
+  "Cecum mass / Body mass",
+  "Leptin",
+  "Visceral fat / Body mass",
+  "HDL cholesterol"
+)
+
+# Check that all predictors are numeric
+for (pred in predictors_maaslin) {
+  cat(
+    pred,
+    ": class =",
+    class(metadata[[pred]]),
+    ", non-missing =",
+    sum(!is.na(metadata[[pred]])),
+    ", unique =",
+    length(unique(metadata[[pred]])),
+    "\n"
+  )
+}
+
+# Make sure Group is a factor
+metadata$Group <- as.factor(metadata$Group)
+
+# Store significant ASVs
+significant_asvs <- c()
+
+# ------------------------------------------------------------
+# Run MaAsLin2 separately for each predictor
+# ------------------------------------------------------------
+
+for (i in seq_along(predictors_maaslin)) {
+  
+  pred <- predictors_maaslin[i]
+  
+  cat("\n\n========================================\n")
+  cat("Running MaAsLin2 for:", pred, "\n")
+  cat("========================================\n")
+  
+  # Keep samples with complete data for predictor and Group
+  complete_samples <- (
+    !is.na(metadata[[pred]]) &
+      !is.na(metadata$Group)
+  )
+  
+  current_metadata <- metadata[
+    complete_samples,
+    ,
+    drop = FALSE
+  ]
+  
+  current_asv_data <- asv_data[
+    rownames(current_metadata),
+    ,
+    drop = FALSE
+  ]
+  
+  # Output directory
+  output_dir <- paste0(
+    "maaslin_sample_level_out_",
+    pred
+  )
+  
+  # Remove old output directory so results are completely fresh
+  if (dir.exists(output_dir)) {
+    unlink(output_dir, recursive = TRUE, force = TRUE)
+  }
+  
+  # Run MaAsLin2
+  fit <- Maaslin2(
+    input_data = current_asv_data,
+    input_metadata = current_metadata,
+    output = output_dir,
+    
+    fixed_effects = c(pred),
+    random_effects = c("Group"),
+    
+    analysis_method = "LM",
+    normalization = "NONE",
+    transform = "NONE",
+    
+    min_abundance = -Inf,
+    min_prevalence = 0.0,
+    
+    plot_heatmap = FALSE,
+    plot_scatter = FALSE
+  )
+  
+  # Read results
+  results_path <- file.path(
+    output_dir,
+    "all_results.tsv"
+  )
+  
+  if (file.exists(results_path)) {
+    
+    results <- read_tsv(
+      results_path,
+      show_col_types = FALSE
+    )
+    
+    # Report what happened
+    n_results <- sum(results$metadata == pred)
+    
+    cat(
+      "Samples used:",
+      nrow(current_metadata),
+      "\n"
+    )
+    
+    cat(
+      "Results for predictor:",
+      n_results,
+      "\n"
+    )
+    
+    if (n_results > 0) {
+      
+      sig_features <- results %>%
+        filter(
+          metadata == pred,
+          qval < 0.05
+        ) %>%
+        pull(feature)
+      
+      significant_asvs <- c(
+        significant_asvs,
+        sig_features
+      )
+      
+      cat(
+        "Significant ASVs (q < 0.05):",
+        length(sig_features),
+        "\n"
+      )
+      
+    } else {
+      
+      cat(
+        "WARNING: MaAsLin2 returned no results for",
+        pred,
+        "\n"
+      )
+    }
+    
+  } else {
+    
+    cat(
+      "WARNING: all_results.tsv was not created for",
+      pred,
+      "\n"
+    )
+  }
+}
+
+# Unique significant ASVs across all predictors
+significant_asvs <- unique(significant_asvs)
+
+cat(
+  "\n\nTotal unique significant ASVs:",
+  length(significant_asvs),
+  "\n"
+)
+# ============================================================
+# BUILD COEFFICIENT AND Q-VALUE MATRICES
+# ============================================================
+
+# Use the significant ASVs identified above
+significant_asvs <- unique(significant_asvs)
+
+# Initialize matrices
+coef_matrix <- matrix(
+  NA_real_,
+  nrow = length(significant_asvs),
+  ncol = length(predictors_maaslin)
+)
+
+qval_matrix <- matrix(
+  NA_real_,
+  nrow = length(significant_asvs),
+  ncol = length(predictors_maaslin)
+)
+
+rownames(coef_matrix) <- significant_asvs
+rownames(qval_matrix) <- significant_asvs
+
+colnames(coef_matrix) <- predictors_maaslin
+colnames(qval_matrix) <- predictors_maaslin
+
+
+# ------------------------------------------------------------
+# Fill matrices
+# ------------------------------------------------------------
+
+for (i in seq_along(predictors_maaslin)) {
+  
+  pred <- predictors_maaslin[i]
+  
+  results_path <- file.path(
+    paste0("maaslin_sample_level_out_", pred),
+    "all_results.tsv"
+  )
+  
+  results <- read_tsv(
+    results_path,
+    show_col_types = FALSE
+  )
+  
+  results_pred <- results %>%
+    filter(metadata == pred)
+  
+  for (asv in significant_asvs) {
+    
+    hit <- results_pred %>%
+      filter(feature == asv)
+    
+    if (nrow(hit) > 0) {
+      
+      coef_matrix[asv, pred] <- hit$coef[1]
+      qval_matrix[asv, pred] <- hit$qval[1]
+      
+    }
+  }
+}
+
+
+# ------------------------------------------------------------
+# Save raw coefficient and q-value matrices
+# ------------------------------------------------------------
+
+write_tsv(
+  as.data.frame(coef_matrix) %>%
+    rownames_to_column("ASV"),
+  "significant_ASV_Maaslin2_sample_level_coefficients.tsv"
+)
+
+write_tsv(
+  as.data.frame(qval_matrix) %>%
+    rownames_to_column("ASV"),
+  "significant_ASV_Maaslin2_sample_level_qvalues.tsv"
+)
+
+
+# Check that the matrices contain data
+cat("\nCoefficient matrix dimensions:\n")
+print(dim(coef_matrix))
+
+cat("\nNumber of non-NA coefficients by predictor:\n")
+print(colSums(!is.na(coef_matrix)))
+
+cat("\nNumber of significant q-values by predictor:\n")
+print(colSums(qval_matrix < 0.05, na.rm = TRUE))
+# ============================================================
+# HEATMAP
+# ============================================================
+
+library(pheatmap)
+
+# Significance annotations
+sig_annotation <- matrix(
+  "",
+  nrow = nrow(qval_matrix),
+  ncol = ncol(qval_matrix),
+  dimnames = dimnames(qval_matrix)
+)
+
+sig_annotation[qval_matrix < 0.05] <- "*"
+sig_annotation[qval_matrix < 0.01] <- "**"
+sig_annotation[qval_matrix < 0.001] <- "***"
+
+
+# ------------------------------------------------------------
+# Row-scale coefficients
+# ------------------------------------------------------------
+
+coef_scaled <- t(scale(t(coef_matrix)))
+
+# Replace NaN values if an ASV has identical coefficients
+coef_scaled[is.nan(coef_scaled)] <- 0
+
+
+# ------------------------------------------------------------
+# Use readable biological names
+# ------------------------------------------------------------
+
+colnames(coef_scaled) <- predictor_labels
+colnames(sig_annotation) <- predictor_labels
+
+
+# ------------------------------------------------------------
+# Plot
+# ------------------------------------------------------------
+
+p <- pheatmap(
+  coef_scaled,
+  
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  
+  clustering_distance_rows = "euclidean",
+  clustering_method = "complete",
+  
+  display_numbers = sig_annotation,
+  number_color = "black",
+  fontsize_number = 9,
+  
+  color = colorRampPalette(
+    c("blue", "white", "red")
+  )(100),
+  
+  breaks = seq(-2, 2, length.out = 101),
+  
+  main = "Significant ASVs Across Sample-Level Predictors",
+  
+  xlab = "Predictor",
+  ylab = "ASV",
+  
+  angle_col = 45,
+  
+  fontsize_row = 8,
+  fontsize_col = 10,
+  
+  border_color = "grey90",
+  
+  treeheight_row = 100,
+  treeheight_col = 0
+)
+
+print(p)
+
+
+####do groupwise tests with maaslin2 to find asv that are different between MDM and all FM meats
+fit_output <- Maaslin2(
+  input_data = "featuretable_gg2.tsv",            # Raw count table (transposed)
+  input_metadata = "sm_metadata_all_groups.tsv",       # Cleaned metadata
+  output = "maaslin2_output_MDM",            # Folder destination for results
+  fixed_effects = c("Group"),
+  reference = c("Group", "MDM"),           # Compares all groups to MDM
+  normalization = "TSS",                 # NATIVE: Total Sum Scaling
+  transform = "LOG",                     # NATIVE: Log2 transformation
+  analysis_method = "LM",                # General Linear Mixed-Effects Model
+  correction = "BH",                     # Benjamini-Hochberg FDR correction
+  standardize = TRUE,                   
+  plot_heatmap = FALSE,                   # Will make our own separatly
+  plot_scatter = FALSE                   # Speeds up processing time
+)
+
+####make heatmap showing asv that differentiate MDM, FM3, FM4
+# ============================================================
+# Heatmap of mean z-scored relative abundance for selected ASVs
+# ============================================================
+
+# Install required packages if necessary:
+# install.packages(c("tidyverse", "pheatmap"))
+
+library(tidyverse)
+library(pheatmap)
+
+# ------------------------------------------------------------
+# 1. Define input files and output directory
+# ------------------------------------------------------------
+
+feature_file <- "featuretable_gg2.tsv"
+metadata_file <- "sm_metadata_all_groups.tsv"
+
+output_dir <- "ASV_heatmap_results"
+
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# ------------------------------------------------------------
+# 2. Define the experimental groups to retain
+# ------------------------------------------------------------
+
+groups_to_keep <- c(
+  "MDM", "FM1", "FM2", "FM3", "FM4",
+  "FM5", "FM6", "FM7", "FM8"
+)
+
+# ------------------------------------------------------------
+# 3. Define the ASVs to include in the heatmap
+# ------------------------------------------------------------
+
+selected_asvs <- c(
+  "GB-GCA-013316495.1-WSMP01000005.1",
+  "AB266102",
+  "G000450985",
+  "GB-GCA-910575495.1-CAJTFS010000013.1",
+  "G001915615",
+  "AB916501",
+  "GB-GCA-910576305.1-CAJTHQ010000104.1",
+  "RS-GCF-910576605.1-NZ-CAJTJN010000098.1",
+  "KR364771",
+  "AJ315980",
+  "AB238928",
+  "GB-GCA-008669045.1-RQAJ01000001.1",
+  "RS-GCF-004766125.1-NZ-SJSA01000001.1",
+  "G000296835",
+  "G900101065",
+  "MJ006-2-barcode64-umi114212bins-ubs-4",
+  "RS-GCF-001813455.1-NZ-KV812597.1",
+  "RS-GCF-003671855.1-NZ-RAZM01000129.1"
+)
+
+# ------------------------------------------------------------
+# 4. Read the feature table and metadata
+# ------------------------------------------------------------
+
+feature_table <- read.delim(
+  feature_file,
+  header = TRUE,
+  sep = "\t",
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+metadata <- read.delim(
+  metadata_file,
+  header = TRUE,
+  sep = "\t",
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+# Check required columns
+stopifnot("Feature_ID" %in% colnames(feature_table))
+stopifnot("sample_name" %in% colnames(metadata))
+stopifnot("Group" %in% colnames(metadata))
+
+# Ensure feature IDs and sample IDs are character strings
+feature_table$Feature_ID <- as.character(feature_table$Feature_ID)
+metadata$sample_name <- as.character(metadata$sample_name)
+metadata$Group <- as.character(metadata$Group)
+
+# Check for duplicated IDs
+if (anyDuplicated(feature_table$Feature_ID)) {
+  stop("Feature_ID contains duplicates. Resolve them before proceeding.")
+}
+
+if (anyDuplicated(metadata$sample_name)) {
+  stop("sample_name contains duplicates in the metadata.")
+}
+
+# ------------------------------------------------------------
+# 5. Filter metadata to the selected groups
+# ------------------------------------------------------------
+
+metadata_filtered <- metadata %>%
+  filter(Group %in% groups_to_keep)
+
+if (nrow(metadata_filtered) == 0) {
+  stop("No samples were found in the specified groups.")
+}
+
+# Retain only samples present in both files
+available_samples <- intersect(
+  colnames(feature_table),
+  metadata_filtered$sample_name
+)
+
+# Preserve the requested group ordering
+metadata_filtered <- metadata_filtered %>%
+  filter(sample_name %in% available_samples) %>%
+  mutate(Group = factor(Group, levels = groups_to_keep)) %>%
+  arrange(Group, sample_name)
+
+if (length(available_samples) == 0) {
+  stop(
+    "No matching sample IDs were found between the feature table ",
+    "and metadata. Check sample_name and column names."
+  )
+}
+
+# Warn if metadata samples are missing from the feature table
+missing_samples <- setdiff(
+  metadata_filtered$sample_name,
+  colnames(feature_table)
+)
+
+# ------------------------------------------------------------
+# 6. Extract the selected sample columns
+# ------------------------------------------------------------
+
+feature_filtered <- feature_table %>%
+  select(Feature_ID, all_of(available_samples))
+
+# Convert the count columns to numeric
+count_matrix <- as.matrix(
+  feature_filtered[, -1, drop = FALSE]
+)
+
+storage.mode(count_matrix) <- "numeric"
+
+rownames(count_matrix) <- feature_filtered$Feature_ID
+
+if (anyNA(count_matrix) || any(!is.finite(count_matrix))) {
+  stop("Count matrix contains missing or non-finite values.")
+}
+
+if (any(count_matrix < 0)) {
+  stop("Count matrix contains negative abundances.")
+}
+
+# Remove samples with zero total counts to avoid division by zero
+sample_totals <- colSums(count_matrix)
+
+zero_samples <- names(sample_totals)[sample_totals == 0]
+
+if (length(zero_samples) > 0) {
+  warning(
+    "Removing samples with zero total counts: ",
+    paste(zero_samples, collapse = ", ")
+  )
+  
+  count_matrix <- count_matrix[
+    , sample_totals > 0, drop = FALSE
+  ]
+  
+  metadata_filtered <- metadata_filtered %>%
+    filter(sample_name %in% colnames(count_matrix))
+}
+
+if (ncol(count_matrix) < 2) {
+  stop("At least two non-zero samples are required for z-scoring.")
+}
+
+# ------------------------------------------------------------
+# 7. Convert counts to relative abundances
+# ------------------------------------------------------------
+
+# Divide each ASV count by the total count in its sample.
+relative_abundance <- sweep(
+  count_matrix,
+  MARGIN = 2,
+  STATS = colSums(count_matrix),
+  FUN = "/"
+)
+
+# ------------------------------------------------------------
+# 8. Calculate z-scores for each ASV across samples
+# ------------------------------------------------------------
+
+# Each ASV is standardized across all retained samples.
+# Rows = ASVs; columns = samples.
+
+asv_means <- rowMeans(relative_abundance)
+
+asv_sds <- apply(relative_abundance, 1, sd)
+
+# Remove ASVs with zero variance, since their z-scores are undefined.
+variable_asvs <- !is.na(asv_sds) & asv_sds > 0
+
+relative_abundance_variable <- relative_abundance[
+  variable_asvs, , drop = FALSE
+]
+
+asv_means_variable <- asv_means[variable_asvs]
+asv_sds_variable <- asv_sds[variable_asvs]
+
+zscore_matrix <- sweep(
+  relative_abundance_variable,
+  MARGIN = 1,
+  STATS = asv_means_variable,
+  FUN = "-"
+)
+
+zscore_matrix <- sweep(
+  zscore_matrix,
+  MARGIN = 1,
+  STATS = asv_sds_variable,
+  FUN = "/"
+)
+
+# ------------------------------------------------------------
+# 9. Keep only the requested ASVs
+# ------------------------------------------------------------
+
+asvs_found <- intersect(
+  selected_asvs,
+  rownames(zscore_matrix)
+)
+
+asvs_missing <- setdiff(
+  selected_asvs,
+  rownames(count_matrix)
+)
+
+asvs_zero_variance <- intersect(
+  selected_asvs,
+  rownames(count_matrix)[!variable_asvs]
+)
+
+if (length(asvs_missing) > 0) {
+  warning(
+    "These requested ASVs were not found in the feature table: ",
+    paste(asvs_missing, collapse = ", ")
+  )
+}
+
+if (length(asvs_zero_variance) > 0) {
+  warning(
+    "These requested ASVs have zero variance and cannot be z-scored: ",
+    paste(asvs_zero_variance, collapse = ", ")
+  )
+}
+
+if (length(asvs_found) == 0) {
+  stop(
+    "None of the selected ASVs were available for heatmap generation."
+  )
+}
+
+zscore_selected <- zscore_matrix[
+  asvs_found, , drop = FALSE
+]
+
+# ------------------------------------------------------------
+# 10. Calculate mean z-score for each ASV in each group
+# ------------------------------------------------------------
+
+sample_groups <- metadata_filtered$Group[
+  match(colnames(zscore_selected),
+        metadata_filtered$sample_name)
+]
+
+mean_zscore_by_group <- sapply(
+  groups_to_keep,
+  function(g) {
+    group_samples <- colnames(zscore_selected)[
+      sample_groups == g
+    ]
+    
+    if (length(group_samples) == 0) {
+      return(rep(NA_real_, nrow(zscore_selected)))
+    }
+    
+    rowMeans(
+      zscore_selected[, group_samples, drop = FALSE]
+    )
+  }
+)
+
+rownames(mean_zscore_by_group) <- rownames(zscore_selected)
+
+# Remove groups with no retained samples
+groups_present <- groups_to_keep[
+  groups_to_keep %in% as.character(sample_groups)
+]
+
+mean_zscore_by_group <- mean_zscore_by_group[
+  , groups_present, drop = FALSE
+]
+
+# ------------------------------------------------------------
+# 11. Save the mean z-score matrix
+# ------------------------------------------------------------
+
+write.table(
+  mean_zscore_by_group,
+  file = file.path(
+    output_dir,
+    "mean_zscore_relative_abundance_by_group.tsv"
+  ),
+  sep = "\t",
+  quote = FALSE,
+  col.names = NA
+)
+
+# Save the retained sample metadata
+write.table(
+  metadata_filtered,
+  file = file.path(output_dir, "filtered_metadata.tsv"),
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------
+# 12. Generate the heatmap
+# ------------------------------------------------------------
+
+# Do not cluster groups or ASVs, so the requested group order
+# and ASV order are preserved.
+
+heatmap_colors <- colorRampPalette(
+  c("#2166AC", "white", "#B2182B")
+)(100)
+
+# Symmetric color limits centered on zero
+max_abs <- max(abs(mean_zscore_by_group), na.rm = TRUE)
+
+if (!is.finite(max_abs) || max_abs == 0) {
+  max_abs <- 1
+}
+pheatmap(
+  mean_zscore_by_group,
+  color = heatmap_colors,
+  breaks = seq(-max_abs, max_abs, length.out = 101),
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  scale = "none",
+  border_color = "grey85",
+  na_col = "grey75",
+  fontsize = 10,
+  fontsize_row = 8,
+  fontsize_col = 11,
+  angle_col = 45,
+  main = "Mean z-scored relative abundance by group",
+  xlab = "Experimental group",
+  ylab = "ASV",
+  legend = TRUE,
+  filename = NA
+)
+
